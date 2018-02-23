@@ -8,9 +8,10 @@ from anago.layers import ChainCRF
 
 class BaseModel(object):
 
-    def __init__(self, config, embeddings, ntags):
+    def __init__(self, config, embeddings, char_embeddings, ntags):
         self.config = config
         self.embeddings = embeddings
+        self.char_embeddings = char_embeddings
         self.ntags = ntags
         self.model = None
 
@@ -42,7 +43,11 @@ class SeqLabeling(BaseModel):
     https://arxiv.org/abs/1603.01360
     """
 
-    def __init__(self, config, embeddings=None, ntags=None):
+    def __init__(self, config, embeddings=None,
+                 char_embeddings=None, ntags=None,
+                 lstm_depth=1):
+
+        super().__init__(config, embeddings, char_embeddings, ntags)
         # build word embedding
         word_ids = Input(batch_shape=(None, None), dtype='int32')
         if embeddings is None:
@@ -57,10 +62,16 @@ class SeqLabeling(BaseModel):
 
         # build character based word embedding
         char_ids = Input(batch_shape=(None, None, None), dtype='int32')
-        char_embeddings = Embedding(input_dim=config.char_vocab_size,
-                                    output_dim=config.char_embedding_size,
-                                    mask_zero=True
-                                    )(char_ids)
+        if char_embeddings is None:
+            char_embeddings = Embedding(input_dim=config.char_vocab_size,
+                                        output_dim=config.char_embedding_size,
+                                        mask_zero=True)(char_ids)
+        else:
+            char_embeddings = Embedding(input_dim=config.char_vocab_size,
+                                        output_dim=config.char_embedding_size,
+                                        mask_zero=True,
+                                        weights=[char_embeddings])(char_ids)
+
         s = K.shape(char_embeddings)
         char_embeddings = Lambda(lambda x: K.reshape(x, shape=(-1, s[-2], config.char_embedding_size)))(char_embeddings)
 
@@ -74,7 +85,11 @@ class SeqLabeling(BaseModel):
         x = Concatenate(axis=-1)([word_embeddings, char_embeddings])
         x = Dropout(config.dropout)(x)
 
-        x = Bidirectional(LSTM(units=config.num_word_lstm_units, return_sequences=True))(x)
+        # See Reimers & Gurevych 2017 for discussion of the impact of
+        # including multiple LSTM layers.
+        for _ in range(lstm_depth):
+            x = Bidirectional(LSTM(units=config.num_word_lstm_units, return_sequences=True))(x)
+
         x = Dropout(config.dropout)(x)
         x = Dense(config.num_word_lstm_units, activation='tanh')(x)
         x = Dense(ntags)(x)

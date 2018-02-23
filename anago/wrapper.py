@@ -8,7 +8,7 @@ from anago.models import SeqLabeling
 from anago.preprocess import prepare_preprocessor, WordPreprocessor, filter_embeddings
 from anago.tagger import Tagger
 from anago.trainer import Trainer
-
+from sklearn.model_selection import KFold
 
 class Sequence(object):
 
@@ -21,7 +21,7 @@ class Sequence(object):
                  batch_size=20, optimizer='adam', learning_rate=0.001, lr_decay=0.9,
                  clip_gradients=5.0, max_epoch=15, early_stopping=True, patience=3,
                  train_embeddings=True, max_checkpoints_to_keep=5, log_dir=None,
-                 embeddings=()):
+                 embeddings=(), char_embeddings=(), lstm_depth=1):
 
         self.model_config = ModelConfig(char_emb_size, word_emb_size, char_lstm_units,
                                         word_lstm_units, dropout, char_feature, crf)
@@ -33,15 +33,42 @@ class Sequence(object):
         self.p = None
         self.log_dir = log_dir
         self.embeddings = embeddings
+        self.char_embeddings = char_embeddings
+        self.lstm_depth = max(1, lstm_depth)
+
+    def cross_validate(self, x_train, y_train, n_folds=10, vocab_init=None):
+        n2tag = {v: k for k, v in self.p.vocab_tag.items()}
+        kf = KFold(n_splits=n_folds)
+        fold_results = {}
+        for fold_count, (train_idx, test_idx) in enumerate(kf.split(x_train)):
+            xtrain, ytrain = x_train[train_idx], y_train[train_idx]
+            xval, yval = x_train[test_idx], y_train[test_idx]
+            self.train(xtrain, ytrain, xval, yval)
+            f1 = self.eval(xval, yval)
+            predictions = self.model.predict(self.p.transform(xval))
+            tag_predictions = [[n2tag[np.argmax(token)] for token in sent]
+                                   for sent in predictions]
+
+            fold_results[fold_count] = {"f1": f1, "predictions": tag_predictions}
 
     def train(self, x_train, y_train, x_valid=None, y_valid=None, vocab_init=None):
         self.p = prepare_preprocessor(x_train, y_train, vocab_init=vocab_init)
+
         embeddings = filter_embeddings(self.embeddings, self.p.vocab_word,
                                        self.model_config.word_embedding_size)
+
+        char_embeddings = filter_embeddings(self.char_embeddings,
+                                            self.p.vocab_char,
+                                            self.model_config.char_embedding_size)
+
         self.model_config.vocab_size = len(self.p.vocab_word)
         self.model_config.char_vocab_size = len(self.p.vocab_char)
 
-        self.model = SeqLabeling(self.model_config, embeddings, len(self.p.vocab_tag))
+        self.model = SeqLabeling(self.model_config,
+                                 embeddings=embeddings,
+                                 char_embeddings=char_embeddings,
+                                 ntags=len(self.p.vocab_tag),
+                                 lstm_depth=self.lstm_depth)
 
         trainer = Trainer(self.model,
                           self.training_config,
